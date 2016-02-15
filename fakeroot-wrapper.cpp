@@ -209,7 +209,7 @@ Success convertToNative(const std::string& envFilename, const std::string& direc
         std::string data = envLine.substr(0, dataEnd);
         
         struct stat fileInfo;
-        if (stat(filename.c_str(), &fileInfo) == -1)
+        if (lstat(filename.c_str(), &fileInfo) == -1)
         {
             std::cerr << APP_NAME ": failed to stat " << filename << ": " << std::strerror(errno)
                       << " (" << envFilename << " line " << envLineNumber << ')' << std::endl;
