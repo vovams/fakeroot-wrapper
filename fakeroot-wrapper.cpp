@@ -1,13 +1,17 @@
 #include <iostream>
 #include <string>
-#include <cstring>
 #include <vector>
 #include <fstream>
+#include <tuple>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
 
 #include <unistd.h>
 #include <libgen.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 #define APP_NAME    "fakeroot-wrapper"
 #define APP_VERSION "0.1"
@@ -18,6 +22,8 @@ enum class Success
     FAIL
 };
 
+static std::pair<int, Success> runFakeroot(const std::string& envFilename, bool save,
+                                           const char* const* args, int argCount);
 static Success convertToNative(const std::string& envFilename, const std::string& directory,
                                const std::string nativeFilename);
 static void printHelp();
@@ -111,7 +117,24 @@ break_while:
             return 2;
     }
     
-    return 0;
+    int exitCode;
+    Success fakerootSuccess;
+    std::tie(exitCode, fakerootSuccess) = runFakeroot(nativeEnvFilename, updateEnvFile,
+                                                      fakerootArgs, fakerootArgCount);
+    
+    if (fakerootSuccess == Success::FAIL)
+        exitCode = 3;
+    
+    if (convertInput)
+    {
+        if (std::remove(nativeEnvFilename.c_str()) != 0)
+        {
+            std::cerr << APP_NAME ": can not remove " << nativeEnvFilename << std::strerror(errno)
+                      << std::endl;
+        }
+    }
+    
+    return exitCode;
 }
 
 void printHelp()
@@ -201,14 +224,74 @@ Success convertToNative(const std::string& envFilename, const std::string& direc
     return Success::OK;
 }
 
+std::pair<int, Success> runFakeroot(const std::string& envFilename, bool save,
+                                    const char* const* args, int argCount)
+{
+    pid_t childPid = fork();
+    if (childPid == -1)
+    {
+        std::perror(APP_NAME ": fork");
+        return std::make_pair(-1, Success::FAIL);
+    }
+    
+    if (childPid == 0)
+    {
+        std::vector<char*> argv;
+        
+        char fakeroot[] = "fakeroot";
+        argv.push_back(fakeroot);
+        
+        char i[] = "-i";
+        argv.push_back(i);
+        argv.push_back((char*) envFilename.c_str());
+        
+        if (save)
+        {
+            char s[] = "-s";
+            argv.push_back(s);
+            argv.push_back((char*) envFilename.c_str());
+        }
+        
+        for (int i = 0; i < argCount; i++)
+            argv.push_back((char*) args[i]);
+        
+        argv.push_back(nullptr);
+        execvp(fakeroot, argv.data());
+        
+        std::perror(APP_NAME ": failed to run fakeroot");
+        std::exit(255);
+    }
+    
+    int status;
+    while (waitpid(childPid, &status, 0) == -1)
+    {
+        if (errno != EINTR)
+        {
+            std::perror(APP_NAME ": failed to wait for fakeroot");
+            return std::make_pair(-1, Success::FAIL);
+        }
+    }
+    
+    if (WIFEXITED(status))
+    {
+        int exitCode = WEXITSTATUS(status);
+        if (exitCode == 255)
+            return std::make_pair(exitCode, Success::FAIL);
+        return std::make_pair(exitCode, Success::OK);
+    }
+    return std::make_pair(-1, Success::OK);
+}
+
 std::string dirname(const std::string& path)
 {
     std::vector<char> buf (path.begin(), path.end());
+    buf.push_back('\0');
     return dirname(&buf[0]);
 }
 
 std::string basename(const std::string& path)
 {
     std::vector<char> buf (path.begin(), path.end());
+    buf.push_back('\0');
     return basename(&buf[0]);
 }
