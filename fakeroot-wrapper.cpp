@@ -2,14 +2,26 @@
 #include <string>
 #include <cstring>
 #include <vector>
+#include <fstream>
 
 #include <unistd.h>
 #include <libgen.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #define APP_NAME    "fakeroot-wrapper"
 #define APP_VERSION "0.1"
 
+enum class Success
+{
+    OK,
+    FAIL
+};
+
+static Success convertToNative(const std::string& envFilename, const std::string& directory,
+                               const std::string nativeFilename);
 static void printHelp();
+
 static std::string dirname(const std::string& path);
 static std::string basename(const std::string& path);
 
@@ -81,12 +93,23 @@ break_while:
     const char* const* fakerootArgs = argv + optind;
     int fakerootArgCount = argc - optind;
     
+    std::string nativeEnvFilename = ( convertInput ? envFilename + ".tmp" : envFilename );
+    
+#if 0
     std::cout << "dir = " << directoryPath << '\n'
               << "env = " << envFilename << '\n'
+              << "tmp = " << nativeEnvFilename << '\n'
               << "upd = " << updateEnvFile << '\n'
               << "cnv = " << convertInput << '\n'
               << "pss = " << ( *fakerootArgs ?: "(null)" ) << " (" << fakerootArgCount << ")\n"
               << std::flush;
+#endif
+    
+    if (convertInput)
+    {
+        if (convertToNative(envFilename, directoryPath, nativeEnvFilename) != Success::OK)
+            return 2;
+    }
     
     return 0;
 }
@@ -124,6 +147,58 @@ void printHelp()
                  "    fakeroot's arguments. Additionally the first non-option argument does\n"
                  "    the same.\n"
               << std::flush;
+}
+
+Success convertToNative(const std::string& envFilename, const std::string& directory,
+                        const std::string nativeFilename)
+{
+    std::ifstream envFile (envFilename);
+    if (!envFile)
+    {
+        std::cerr << APP_NAME << ": can not open " << envFilename << ": " << std::strerror(errno)
+                  << std::endl;
+        return Success::FAIL;
+    }
+    
+    std::ofstream nativeFile (nativeFilename, std::ofstream::trunc);
+    if (!nativeFile)
+    {
+        std::cerr << APP_NAME << ": can not open " << nativeFilename << ": "
+                  << std::strerror(errno) << std::endl;
+        return Success::FAIL;
+    }
+    
+    int envLineNumber = 0;
+    std::string envLine;
+    while (std::getline(envFile, envLine))
+    {
+        envLineNumber++;
+        
+        size_t dataEnd = envLine.find(';');
+        if (dataEnd == std::string::npos)
+        {
+            std::cerr << APP_NAME ": bad line format in " << envFilename << " at line "
+                      << envLineNumber << std::endl;
+            continue;
+        }
+        
+        std::string filename = directory + '/' + envLine.substr(dataEnd + 1);
+        std::string data = envLine.substr(0, dataEnd);
+        
+        struct stat fileInfo;
+        if (stat(filename.c_str(), &fileInfo) == -1)
+        {
+            std::cerr << APP_NAME ": failed to stat " << filename << ": " << std::strerror(errno)
+                      << " (" << envFilename << " line " << envLineNumber << ')' << std::endl;
+            continue;
+        }
+        
+        nativeFile << "dev=" << std::hex << fileInfo.st_dev
+                   << ",ino=" << std::dec << fileInfo.st_ino
+                   << ',' << data << '\n';
+    }
+    
+    return Success::OK;
 }
 
 std::string dirname(const std::string& path)
