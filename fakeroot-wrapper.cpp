@@ -1,14 +1,19 @@
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <fstream>
+#include <map>
+#include <stack>
 #include <tuple>
+#include <regex>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 
 #include <unistd.h>
 #include <libgen.h>
+#include <dirent.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -25,8 +30,13 @@ enum class Success
 static std::pair<int, Success> runFakeroot(const std::string& envFilename, bool load, bool save,
                                            const char* const* args, int argCount);
 static Success convertToNative(const std::string& envFilename, const std::string& directory,
-                               const std::string nativeFilename);
+                               const std::string& nativeFilename);
+static Success convertFromNative(const std::string& nativeFilename, const std::string& directory,
+                                 const std::string& envFilename);
 static void printHelp();
+
+static std::pair<std::map<std::pair<dev_t, ino_t>, std::string>, Success> readNativeEnvFile(
+        const std::string& filename);
 
 static std::string dirname(const std::string& path);
 static std::string basename(const std::string& path);
@@ -151,6 +161,12 @@ break_while:
     if (fakerootSuccess == Success::FAIL)
         exitCode = 3;
     
+    if (updateEnvFile && fakerootSuccess == Success::OK)
+    {
+        if (convertFromNative(nativeEnvFilename, directoryPath, envFilename) != Success::OK)
+            return 4;
+    }
+    
     if (convertInput)
     {
         if (std::remove(nativeEnvFilename.c_str()) != 0)
@@ -206,7 +222,7 @@ void printHelp()
 }
 
 Success convertToNative(const std::string& envFilename, const std::string& directory,
-                        const std::string nativeFilename)
+                        const std::string& nativeFilename)
 {
     std::ifstream envFile (envFilename);
     if (!envFile)
@@ -264,7 +280,7 @@ std::pair<int, Success> runFakeroot(const std::string& envFilename, bool load, b
     if (childPid == -1)
     {
         std::perror(APP_NAME ": fork");
-        return std::make_pair(-1, Success::FAIL);
+        return { -1, Success::FAIL };
     }
     
     if (childPid == 0)
@@ -304,7 +320,7 @@ std::pair<int, Success> runFakeroot(const std::string& envFilename, bool load, b
         if (errno != EINTR)
         {
             std::perror(APP_NAME ": failed to wait for fakeroot");
-            return std::make_pair(-1, Success::FAIL);
+            return { -1, Success::FAIL };
         }
     }
     
@@ -312,10 +328,155 @@ std::pair<int, Success> runFakeroot(const std::string& envFilename, bool load, b
     {
         int exitCode = WEXITSTATUS(status);
         if (exitCode == 255)
-            return std::make_pair(exitCode, Success::FAIL);
-        return std::make_pair(exitCode, Success::OK);
+            return { exitCode, Success::FAIL };
+        return { exitCode, Success::OK };
     }
-    return std::make_pair(-1, Success::OK);
+    return { -1, Success::OK };
+}
+
+Success convertFromNative(const std::string& nativeFilename, const std::string& directory,
+                          const std::string& envFilename)
+{
+    std::map<std::pair<dev_t, ino_t>, std::string> data;
+    Success nativeReadResult;
+    std::tie(data, nativeReadResult) = readNativeEnvFile(nativeFilename);
+    if (nativeReadResult == Success::FAIL)
+        return Success::FAIL;
+    
+    std::ofstream envFile (envFilename, std::ofstream::trunc);
+    if (!envFile)
+    {
+        std::cerr << APP_NAME ": failed to write " << envFilename << ": " << std::strerror(errno)
+                  << std::endl;
+        return Success::FAIL;
+    }
+    
+    std::stack<std::string> dirStack;
+    dirStack.push(directory);
+    while (!dirStack.empty())
+    {
+        std::string curDir = dirStack.top();
+        dirStack.pop();
+        
+        DIR* dirStream = opendir(curDir.c_str());
+        if (!dirStream)
+        {
+            std::cerr << APP_NAME ": failed to open directory " << curDir << ": "
+                      << std::strerror(errno) << std::endl;
+            if (curDir == directory)
+                return Success::FAIL;
+            continue;
+        }
+        
+        struct dirent* entry;
+        while ((entry = readdir(dirStream)) != nullptr)
+        {
+            if (std::strcmp(entry->d_name, "..") == 0
+                || (std::strcmp(entry->d_name, ".") == 0 && curDir != directory))
+                continue;
+            
+            std::string filename = curDir + '/' + entry->d_name;
+            
+            struct stat fileInfo;
+            if (lstat(filename.c_str(), &fileInfo) == -1)
+            {
+                std::cerr << APP_NAME ": failed to stat " << filename << ": "
+                            << std::strerror(errno) << "; skipping" << std::endl;
+                continue;
+            }
+            
+            auto dataEntry = data.find({ fileInfo.st_dev, fileInfo.st_ino });
+            if (dataEntry != data.end())
+            {
+                envFile << dataEntry->second << ';'
+                        << filename.substr(directory.length() + 1) << '\n';
+                data.erase(dataEntry);
+            }
+            
+            if ((fileInfo.st_mode & S_IFMT) == S_IFDIR)
+                dirStack.push(filename);
+        }
+        
+        closedir(dirStream);
+    }
+    
+    for (const auto& d : data)
+    {
+        std::cerr << APP_NAME << ": entry (dev=" << std::hex << d.first.first
+                  << ",ino=" << std::dec << d.first.second << ") not found in " << directory
+                  << "; not preserving" << std::endl;
+    }
+    
+    return Success::OK;
+}
+
+std::pair<std::map<std::pair<dev_t, ino_t>, std::string>, Success> readNativeEnvFile(
+        const std::string& filename)
+{
+    std::ifstream file (filename);
+    if (!file)
+    {
+        std::cerr << APP_NAME ": failed to open " << filename << ": " << std::strerror(errno)
+                  << std::endl;
+        return { {}, Success::FAIL };
+    }
+    
+    std::map<std::pair<dev_t, ino_t>, std::string> data;
+    std::string line;
+    int lineNumber = 0;
+    while (std::getline(file, line))
+    {
+        lineNumber++;
+        
+        static const auto REGEX_FLAGS = std::regex::icase | std::regex::optimize;
+        static const std::regex DEV_REGEX ("(?:^|,)dev=([0-9a-f]+)(?:,|$)", REGEX_FLAGS);
+        static const std::regex INO_REGEX ("(?:^|,)ino=([0-9]+)(?:,|$)", REGEX_FLAGS);
+        
+        bool ok = true;
+        std::smatch matches;
+        
+        dev_t dev = -1;
+        if (!std::regex_search(line, matches, DEV_REGEX))
+            ok = false;
+        else
+        {
+            std::istringstream s (matches[1]);
+            s >> std::hex;
+            if (!(s >> dev))
+                ok = false;
+        }
+        
+        ino_t ino = -1;
+        if (!std::regex_search(line, matches, INO_REGEX))
+            ok = false;
+        else
+        {
+            std::istringstream s (matches[1]);
+            if (!(s >> ino))
+                ok = false;
+        }
+        
+        static const auto CLEAR_REGEXES = {
+            std::make_pair(DEV_REGEX, ","),
+            { INO_REGEX, "," },
+            { std::regex("^,", REGEX_FLAGS), "" },
+            { std::regex(",$", REGEX_FLAGS), "" }
+        };
+        
+        std::string curData = line;
+        for (const auto& r : CLEAR_REGEXES)
+            curData = std::regex_replace(curData, r.first, r.second);
+        
+        if (ok)
+            data.insert({ { dev, ino }, curData });
+        else
+        {
+            std::cerr << APP_NAME ": failed to parse line " << lineNumber << " of " << filename
+                      << std::endl;
+        }
+    }
+    
+    return { data, Success::OK };
 }
 
 std::string dirname(const std::string& path)
