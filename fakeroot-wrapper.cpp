@@ -290,16 +290,16 @@ std::pair<int, Success> runFakeroot(const std::string& envFilename, bool load, b
         char fakeroot[] = "fakeroot";
         argv.push_back(fakeroot);
         
+        char i[] = "-i";
         if (load)
         {
-            char i[] = "-i";
             argv.push_back(i);
             argv.push_back((char*) envFilename.c_str());
         }
         
+        char s[] = "-s";
         if (save)
         {
-            char s[] = "-s";
             argv.push_back(s);
             argv.push_back((char*) envFilename.c_str());
         }
