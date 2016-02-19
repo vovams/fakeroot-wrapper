@@ -32,7 +32,7 @@ static std::pair<int, Success> runFakeroot(const std::string& envFilename, bool 
 static Success convertToNative(const std::string& envFilename, const std::string& directory,
                                const std::string& nativeFilename);
 static Success convertFromNative(const std::string& nativeFilename, const std::string& directory,
-                                 const std::string& envFilename);
+                                 const std::string& envFilename, bool warnNotListed);
 static void printHelp();
 
 static std::pair<std::map<std::pair<dev_t, ino_t>, std::string>, Success> readNativeEnvFile(
@@ -48,11 +48,12 @@ int main(int argc, char** argv)
     bool envFilenameSet = false;
     bool createHiddenEnvFile = false;
     bool updateEnvFile = true;
+    bool warnAboutNotListedFiles = false;
     bool convertInput = true;
     
     while (1)
     {
-        switch (getopt(argc, argv, "+d:f:hric"))
+        switch (getopt(argc, argv, "+d:f:hrica"))
         {
             case 'd':
                 directoryPath = optarg;
@@ -95,6 +96,10 @@ int main(int argc, char** argv)
             
             case 'c':
                 createHiddenEnvFile = true;
+                break;
+            
+            case 'a':
+                warnAboutNotListedFiles = true;
                 break;
             
             case 'h':
@@ -163,7 +168,8 @@ break_while:
     
     if (updateEnvFile && fakerootSuccess == Success::OK)
     {
-        if (convertFromNative(nativeEnvFilename, directoryPath, envFilename) != Success::OK)
+        if (convertFromNative(nativeEnvFilename, directoryPath, envFilename,
+                              warnAboutNotListedFiles) != Success::OK)
             return 4;
     }
     
@@ -210,6 +216,12 @@ void printHelp()
                  "    file does not exist already, running " APP_NAME " will create it,\n"
                  "    which may be counterintuitive. Therefore " APP_NAME " will fail\n"
                  "    instead. Pass this option to disable this check.\n"
+                 "\n"
+                 "-a\n"
+                 "    All files. Show warnings for files (and directories) inside directory\n"
+                 "    specified by -d which are not listed in fakeroot environment file. Any\n"
+                 "    change of attributes of those files outside of fakeroot environment will\n"
+                 "    affect their attributes inside fakeroot environment.\n"
                  "\n"
                  "-h\n"
                  "    Guess what it does.\n"
@@ -335,7 +347,7 @@ std::pair<int, Success> runFakeroot(const std::string& envFilename, bool load, b
 }
 
 Success convertFromNative(const std::string& nativeFilename, const std::string& directory,
-                          const std::string& envFilename)
+                          const std::string& envFilename, bool warnNotListed)
 {
     std::map<std::pair<dev_t, ino_t>, std::string> data;
     Success nativeReadResult;
@@ -381,19 +393,24 @@ Success convertFromNative(const std::string& nativeFilename, const std::string& 
             if (lstat(filename.c_str(), &fileInfo) == -1)
             {
                 std::cerr << APP_NAME ": failed to stat " << filename << ": "
-                            << std::strerror(errno) << "; skipping" << std::endl;
+                          << std::strerror(errno) << "; skipping" << std::endl;
                 continue;
             }
             
             auto dataEntry = data.find({ fileInfo.st_dev, fileInfo.st_ino });
-            if (dataEntry != data.end())
+            if (dataEntry == data.end())
+            {
+                if (warnNotListed)
+                    std::cerr << APP_NAME ": not saved: " << filename << std::endl;
+            }
+            else
             {
                 envFile << dataEntry->second << ';'
                         << filename.substr(directory.length() + 1) << '\n';
                 data.erase(dataEntry);
             }
             
-            if ((fileInfo.st_mode & S_IFMT) == S_IFDIR)
+            if ((fileInfo.st_mode & S_IFMT) == S_IFDIR && strcmp(entry->d_name, ".") != 0)
                 dirStack.push(filename);
         }
         
@@ -404,7 +421,7 @@ Success convertFromNative(const std::string& nativeFilename, const std::string& 
     {
         std::cerr << APP_NAME << ": entry (dev=" << std::hex << d.first.first
                   << ",ino=" << std::dec << d.first.second << ") not found in " << directory
-                  << "; not preserving" << std::endl;
+                  << "; ignoring" << std::endl;
     }
     
     return Success::OK;
