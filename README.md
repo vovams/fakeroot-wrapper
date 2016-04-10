@@ -5,8 +5,8 @@ device/inode indexed).
 
 fakeroot has support for saving the state of fake environment into a file when it exits provided by
 it's `-s` and `-i` options. However, that file is device/inode number indexed, which means that fake
-attributes are mapped to files by their device number and inode numbers. This has a disadvantage: if
-files which attributes have been saved are modified, copied or moved to another partition, their
+attributes are mapped to files by their device numbers and inode numbers. This has a disadvantage:
+if files which attributes have been saved are modified, copied or moved to another partition, their
 device and inode numbers may change, and that makes environment state file invalid.
 
 This wrapper program tries to remove this limitation. It converts fakeroot environment file into
