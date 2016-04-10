@@ -1,4 +1,4 @@
-CXXFLAGS = -std=gnu++11 -Wall
+CXXFLAGS = -std=c++11 -Wall
 
 app = fakeroot-wrapper
 
