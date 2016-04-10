@@ -19,7 +19,7 @@
 #include <sys/wait.h>
 
 #define APP_NAME    "fakeroot-wrapper"
-#define APP_VERSION "0.1"
+#define APP_VERSION "1.0"
 
 enum class Success
 {
